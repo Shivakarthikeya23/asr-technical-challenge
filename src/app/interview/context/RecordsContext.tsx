@@ -41,26 +41,26 @@ interface RecordsContextValue {
 const RecordsContext = createContext<RecordsContextValue | undefined>(undefined);
 
 export function RecordsProvider({ children }: { children: React.ReactNode }) {
-  const [data, setData] = useState<RecordItem[]>([]);
-  const [busy, setBusy] = useState<boolean>(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [log, setLog] = useState<RecordHistoryEntry[]>([]);
+  const [records, setRecords] = useState<RecordItem[]>([]);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<RecordHistoryEntry[]>([]);
 
   const loadData = useCallback(async () => {
-    setBusy(true);
-    setErr(null);
+    setLoading(true);
+    setError(null);
     try {
       const response = await fetch('/api/mock/records');
       if (!response.ok) {
         throw new Error(`Failed to load records: ${response.statusText}`);
       }
       const incoming = (await response.json()) as RecordItem[];
-      setData(incoming);
+      setRecords(incoming);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      setErr(message);
+      setError(message);
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }, []);
 
@@ -68,8 +68,8 @@ export function RecordsProvider({ children }: { children: React.ReactNode }) {
     loadData();
   }, [loadData]);
 
-  const doUpdate = useCallback(async (id: string, updates: { status?: RecordStatus; note?: string }) => {
-    setErr(null);
+  const updateRecord = useCallback(async (id: string, updates: { status?: RecordStatus; note?: string }) => {
+    setError(null);
     try {
       const response = await fetch('/api/mock/records', {
         method: 'PATCH',
@@ -80,42 +80,75 @@ export function RecordsProvider({ children }: { children: React.ReactNode }) {
         throw new Error(`Failed to update record: ${response.statusText}`);
       }
       const updated = (await response.json()) as RecordItem;
-      setData((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
-
-      const prevRecord = data.find((r) => r.id === id);
+      
+      // Capture previous state BEFORE updating records for history
+      // Use functional update to get current state, but capture prevRecord first
+      let prevRecord: RecordItem | undefined;
+      setRecords((prev) => {
+        prevRecord = prev.find((r) => r.id === id);
+        return prev.map((r) => (r.id === updated.id ? updated : r));
+      });
+      
+      // Add history entry AFTER records update, if status changed
+      // Use functional update to prevent duplicates (e.g., from React Strict Mode double renders)
       if (prevRecord && updates.status && prevRecord.status !== updates.status) {
-        const entry: RecordHistoryEntry = {
-          id,
-          previousStatus: prevRecord.status,
-          newStatus: updates.status,
-          note: updates.note,
-          timestamp: new Date().toISOString(),
-        };
-        setLog((prevHist) => [...prevHist, entry]);
+        // Capture values before entering callback to satisfy TypeScript
+        const previousStatus = prevRecord.status;
+        const newStatus = updates.status;
+        const note = updates.note;
+        
+        setHistory((prevHist) => {
+          // Prevent duplicate entries: check if the last entry for this record ID
+          // already has the same status change (within last second to handle rapid updates)
+          const lastEntry = prevHist[prevHist.length - 1];
+          const now = Date.now();
+          const oneSecondAgo = now - 1000;
+          
+          if (
+            lastEntry &&
+            lastEntry.id === id &&
+            lastEntry.previousStatus === previousStatus &&
+            lastEntry.newStatus === newStatus &&
+            new Date(lastEntry.timestamp).getTime() > oneSecondAgo
+          ) {
+            // Duplicate detected, return existing history
+            return prevHist;
+          }
+          
+          // Add new entry
+          const entry: RecordHistoryEntry = {
+            id,
+            previousStatus,
+            newStatus,
+            note,
+            timestamp: new Date().toISOString(),
+          };
+          return [...prevHist, entry];
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      setErr(message);
+      setError(message);
       throw error;
     }
-  }, [data]);
+  }, []);
 
-  const reLoad = useCallback(async () => {
+  const refresh = useCallback(async () => {
     await loadData();
   }, [loadData]);
 
-  const purgeLog = useCallback(() => {
-    setLog([]);
+  const clearHistory = useCallback(() => {
+    setHistory([]);
   }, []);
 
   const value = {
-    records: data,
-    loading: busy,
-    error: err,
-    updateRecord: doUpdate,
-    refresh: reLoad,
-    history: log,
-    clearHistory: purgeLog,
+    records,
+    loading,
+    error,
+    updateRecord,
+    refresh,
+    history,
+    clearHistory,
   };
   return <RecordsContext.Provider value={value}>{children}</RecordsContext.Provider>;
 }
